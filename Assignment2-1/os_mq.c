@@ -1,3 +1,7 @@
+/*
+ * Kernel implementation of named FIFO message queues.
+ * Messages use circular buffers with blocking and nonblocking I/O.
+ */
 #include <linux/kernel.h>
 #include <linux/syscalls.h>
 #include <linux/slab.h>
@@ -8,16 +12,16 @@
 
 #include "os_mq.h"
 
-/* Maximum number of queues */
+// Maximum number of queues
 #define OS_MQ_MAX_QUEUES 16
 
-/* One message stored in a queue */
+// One message stored in a queue
 struct os_mq_message {
     char data[OS_MQ_MSG_MAX];
     unsigned int len;
 };
 
-/* One message queue */
+// One message queue
 struct os_mq_queue {
     int used;
     int qid;
@@ -27,23 +31,26 @@ struct os_mq_queue {
 
     struct os_mq_message *messages;
 
+    // head is the next read position; tail is the next write position.
     int head;
     int tail;
     int count;
 
     struct mutex lock;
 
+    // Receivers wait for data; senders wait for available capacity.
     wait_queue_head_t not_empty;
     wait_queue_head_t not_full;
 };
 
-/* All message queues managed by the kernel */
+// All message queues managed by the kernel
 static struct os_mq_queue queues[OS_MQ_MAX_QUEUES];
 
-/* Protects creation and deletion of queues */
+// Protects creation and deletion of queues
 static DEFINE_MUTEX(queues_lock);
 
 
+// Return a queue ID, byte count, zero, or a negative kernel errno.
 SYSCALL_DEFINE2(os_mq, int, cmd, void __user *, arg)
 {
     int i;
@@ -54,11 +61,11 @@ SYSCALL_DEFINE2(os_mq, int, cmd, void __user *, arg)
         struct os_mq_open_arg open_arg;
         struct os_mq_message *messages;
 
-        /* Copy arguments from user space */
+        // Copy arguments from user space
         if (copy_from_user(&open_arg, arg, sizeof(open_arg)))
             return -EFAULT;
 
-        /* Check arguments */
+        // Check arguments
         if (open_arg.max_msg <= 0)
             return -EINVAL;
 
@@ -66,7 +73,7 @@ SYSCALL_DEFINE2(os_mq, int, cmd, void __user *, arg)
 
         mutex_lock(&queues_lock);
 
-        /* If a queue with the same name exists, return its qid */
+        // If a queue with the same name exists, return its qid
         for (i = 0; i < OS_MQ_MAX_QUEUES; i++) {
             if (queues[i].used &&
                 strcmp(queues[i].name, open_arg.name) == 0) {
@@ -76,7 +83,7 @@ SYSCALL_DEFINE2(os_mq, int, cmd, void __user *, arg)
             }
         }
 
-        /* Find an unused queue slot */
+        // Find an unused queue slot
         for (i = 0; i < OS_MQ_MAX_QUEUES; i++) {
             if (!queues[i].used)
                 break;
@@ -87,7 +94,7 @@ SYSCALL_DEFINE2(os_mq, int, cmd, void __user *, arg)
             return -ENOSPC;
         }
 
-        /* Allocate message storage */
+        // Allocate message storage
         messages = kcalloc(open_arg.max_msg,
                            sizeof(struct os_mq_message),
                            GFP_KERNEL);
@@ -97,7 +104,7 @@ SYSCALL_DEFINE2(os_mq, int, cmd, void __user *, arg)
             return -ENOMEM;
         }
 
-        /* Initialize new queue */
+        // Initialize new queue
         queues[i].used = 1;
         queues[i].qid = i;
 
@@ -130,21 +137,21 @@ SYSCALL_DEFINE2(os_mq, int, cmd, void __user *, arg)
         unsigned int len;
         int ret;
 
-        /* Copy arguments from user space */
+        // Copy arguments from user space
         if (copy_from_user(&io_arg, arg, sizeof(io_arg)))
             return -EFAULT;
 
-        /* Check qid */
+        // Check qid
         if (io_arg.qid < 0 || io_arg.qid >= OS_MQ_MAX_QUEUES)
             return -EINVAL;
 
         q = &queues[io_arg.qid];
 
-        /* Check whether the queue exists */
+        // Check whether the queue exists
         if (!q->used)
             return -EINVAL;
 
-        /* Check message length */
+        // Check message length
         if (io_arg.len == 0 || io_arg.len > OS_MQ_MSG_MAX)
             return -EINVAL;
 
@@ -152,15 +159,16 @@ SYSCALL_DEFINE2(os_mq, int, cmd, void __user *, arg)
 
         mutex_lock(&q->lock);
 
-        /* Wait while the queue is full */
+        // Wait while the queue is full
         while (q->count >= q->max_msg) {
 
-            /* NONBLOCK mode */
+            // NONBLOCK mode
             if (io_arg.flags & OS_MQ_NONBLOCK) {
                 mutex_unlock(&q->lock);
                 return -EAGAIN;
             }
 
+            // Release the lock so receivers can make space while we wait.
             mutex_unlock(&q->lock);
 
             ret = wait_event_interruptible(
@@ -168,14 +176,14 @@ SYSCALL_DEFINE2(os_mq, int, cmd, void __user *, arg)
                 q->count < q->max_msg
             );
 
-            /* Interrupted by a signal */
+            // Interrupted by a signal
             if (ret)
                 return ret;
 
             mutex_lock(&q->lock);
         }
 
-        /* Copy message from user space */
+        // Copy message from user space
         if (copy_from_user(q->messages[q->tail].data,
                            io_arg.buf,
                            len)) {
@@ -185,13 +193,13 @@ SYSCALL_DEFINE2(os_mq, int, cmd, void __user *, arg)
 
         q->messages[q->tail].len = len;
 
-        /* Move tail to the next position */
+        // Move tail to the next position
         q->tail = (q->tail + 1) % q->max_msg;
         q->count++;
 
         mutex_unlock(&q->lock);
 
-        /* Wake up a receiver waiting for a message */
+        // Wake up a receiver waiting for a message
         wake_up_interruptible(&q->not_empty);
 
         return len;
@@ -204,31 +212,32 @@ SYSCALL_DEFINE2(os_mq, int, cmd, void __user *, arg)
     unsigned int len;
     int ret;
 
-    /* Copy arguments from user space */
+    // Copy arguments from user space
     if (copy_from_user(&io_arg, arg, sizeof(io_arg)))
         return -EFAULT;
 
-    /* Check qid */
+    // Check qid
     if (io_arg.qid < 0 || io_arg.qid >= OS_MQ_MAX_QUEUES)
         return -EINVAL;
 
     q = &queues[io_arg.qid];
 
-    /* Check whether the queue exists */
+    // Check whether the queue exists
     if (!q->used)
         return -EINVAL;
 
     mutex_lock(&q->lock);
 
-    /* Wait while the queue is empty */
+    // Wait while the queue is empty
     while (q->count == 0) {
 
-        /* NONBLOCK mode */
+        // NONBLOCK mode
         if (io_arg.flags & OS_MQ_NONBLOCK) {
             mutex_unlock(&q->lock);
             return -EAGAIN;
         }
 
+        // Release the lock so senders can add data while we wait.
         mutex_unlock(&q->lock);
 
         ret = wait_event_interruptible(
@@ -236,14 +245,14 @@ SYSCALL_DEFINE2(os_mq, int, cmd, void __user *, arg)
             q->count > 0
         );
 
-        /* Interrupted by a signal */
+        // Interrupted by a signal
         if (ret)
             return ret;
 
         mutex_lock(&q->lock);
     }
 
-    /* Length of the oldest message */
+    // Length of the oldest message
     len = q->messages[q->head].len;
 
     /*
@@ -255,7 +264,7 @@ SYSCALL_DEFINE2(os_mq, int, cmd, void __user *, arg)
         return -EINVAL;
     }
 
-    /* Copy message to user space */
+    // Copy message to user space
     if (copy_to_user(io_arg.buf,
                      q->messages[q->head].data,
                      len)) {
@@ -263,29 +272,30 @@ SYSCALL_DEFINE2(os_mq, int, cmd, void __user *, arg)
         return -EFAULT;
     }
 
-    /* Remove the message from the queue */
+    // Remove the message from the queue
     q->head = (q->head + 1) % q->max_msg;
     q->count--;
 
     mutex_unlock(&q->lock);
 
-    /* Wake up a sender waiting for free space */
+    // Wake up a sender waiting for free space
     wake_up_interruptible(&q->not_full);
 
     return len;
 }
 
 
+    // CLOSE destroys the shared queue and discards pending messages.
     case OS_MQ_CLOSE:
 {
     struct os_mq_close_arg close_arg;
     struct os_mq_queue *q;
 
-    /* Copy arguments from user space */
+    // Copy arguments from user space
     if (copy_from_user(&close_arg, arg, sizeof(close_arg)))
         return -EFAULT;
 
-    /* Check qid */
+    // Check qid
     if (close_arg.qid < 0 ||
         close_arg.qid >= OS_MQ_MAX_QUEUES)
         return -EINVAL;
@@ -294,7 +304,7 @@ SYSCALL_DEFINE2(os_mq, int, cmd, void __user *, arg)
 
     q = &queues[close_arg.qid];
 
-    /* Check whether the queue exists */
+    // Check whether the queue exists
     if (!q->used) {
         mutex_unlock(&queues_lock);
         return -EINVAL;
@@ -302,7 +312,7 @@ SYSCALL_DEFINE2(os_mq, int, cmd, void __user *, arg)
 
     mutex_lock(&q->lock);
 
-    /* Free dynamically allocated message storage */
+    // Free dynamically allocated message storage
     kfree(q->messages);
 
     q->messages = NULL;

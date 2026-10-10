@@ -1,3 +1,6 @@
+/*
+ * Linux x86-64 module that logs calls to the custom os_mq syscall.
+ */
 
 #include <linux/module.h>
 #include <linux/kernel.h>
@@ -17,20 +20,17 @@ MODULE_LICENSE("GPL");
 MODULE_AUTHOR("OS Assignment 2-2");
 MODULE_DESCRIPTION("os_mq system call hooking module");
 
-/* 시스템 콜 테이블 주소 */
+// Address of the kernel system call table.
 static unsigned long *sys_call_table;
 
-/* 원본 시스템 콜 함수 포인터 */
+// Saved os_mq handler using the x86-64 register-based syscall ABI.
 static asmlinkage long (*original_mq)(
     const struct pt_regs *regs);
 
-/* kallsyms_lookup_name 함수 포인터 */
+// Function pointer for resolving kernel symbols by name.
 static unsigned long (*lookup_name)(const char *name);
 
-/*
- * CR0 값을 직접 기록하는 함수
- * Linux 5.4의 WP 보호 동작을 고려한 실습용 코드
- */
+// Write CR0 directly with inline assembly to control its write-protect bit.
 static void write_cr0_direct(unsigned long value)
 {
     asm volatile("mov %0, %%cr0"
@@ -39,7 +39,7 @@ static void write_cr0_direct(unsigned long value)
                  : "memory");
 }
 
-/* 시스템 콜 테이블 항목 변경 */
+// Replace the os_mq table entry with local interrupts and preemption disabled.
 static void change_syscall(unsigned long new_addr)
 {
     unsigned long cr0;
@@ -50,20 +50,20 @@ static void change_syscall(unsigned long new_addr)
 
     cr0 = read_cr0();
 
-    /* WP 비트 해제 */
+    // Temporarily clear write protection for the table update.
     write_cr0_direct(cr0 & ~X86_CR0_WP);
 
-    /* 336번 시스템 콜 주소 변경 */
+    // Install the replacement at the custom syscall number.
     WRITE_ONCE(sys_call_table[OS_MQ_NR], new_addr);
 
-    /* WP 비트 복원 */
+    // Restore the original CR0 value, including write protection.
     write_cr0_direct(cr0);
 
     local_irq_restore(flags);
     preempt_enable();
 }
 
-/* cmd 번호를 문자열로 변환 */
+// Map a command number to a readable name for logging.
 static const char *get_cmd_name(int cmd)
 {
     switch (cmd) {
@@ -80,7 +80,7 @@ static const char *get_cmd_name(int cmd)
     }
 }
 
-/* 후킹 함수 */
+// Log the command and caller PID, then forward the syscall.
 static asmlinkage long my_mq(const struct pt_regs *regs)
 {
     int cmd = (int)regs->di;
@@ -88,14 +88,11 @@ static asmlinkage long my_mq(const struct pt_regs *regs)
     pr_info("[mqhook] os_mq called: cmd=%d (%s), pid=%d\n",
             cmd, get_cmd_name(cmd), current->pid);
 
-    /* 원본 os_mq 실행 */
+    // Preserve the original arguments and return value.
     return original_mq(regs);
 }
 
-/*
- * kallsyms_lookup_name 주소 탐색
- * 직접 참조가 불가능한 환경을 위해 kprobe 활용
- */
+// Use a temporary kprobe to obtain the address of kallsyms_lookup_name.
 static int resolve_kallsyms(void)
 {
     struct kprobe kp = {
@@ -114,7 +111,7 @@ static int resolve_kallsyms(void)
     return lookup_name ? 0 : -ENOENT;
 }
 
-/* 모듈 적재 */
+// Resolve symbols, save the original handler, and install the hook.
 static int __init mqhook_init(void)
 {
     int ret;
@@ -127,7 +124,7 @@ static int __init mqhook_init(void)
         return ret;
     }
 
-    /* sys_call_table 주소 검색 */
+    // Locate the system call table by its kernel symbol name.
     sys_call_table =
         (unsigned long *)lookup_name("sys_call_table");
 
@@ -136,7 +133,7 @@ static int __init mqhook_init(void)
         return -ENOENT;
     }
 
-    /* 원본 시스템 콜 주소 저장 */
+    // Save the original handler for forwarding and restoration.
     original_mq =
         (void *)READ_ONCE(sys_call_table[OS_MQ_NR]);
 
@@ -154,6 +151,7 @@ static int __init mqhook_init(void)
 }
 
 
+// Restore the saved handler before the module is unloaded.
 static void __exit mqhook_exit(void)
 {
     change_syscall((unsigned long)original_mq);

@@ -1,3 +1,6 @@
+/*
+ * Linux x86-64 module that hooks os_mq and counts attempts by command.
+ */
 
 #include <linux/module.h>
 #include <linux/kernel.h>
@@ -19,20 +22,20 @@ MODULE_LICENSE("GPL");
 MODULE_AUTHOR("os2024402041");
 MODULE_DESCRIPTION("os_mq syscall hooking and counting");
 
-/* 시스템 콜 테이블 */
+// Address of the kernel system call table.
 static unsigned long *sys_call_table;
 
-/* 원본 os_mq 시스템 콜 */
+// Saved os_mq handler for forwarding and restoration.
 static asmlinkage long (*original_mq)(
     const struct pt_regs *regs);
 
-/* kallsyms_lookup_name 함수 포인터 */
+// Function pointer for resolving kernel symbols by name.
 static unsigned long (*lookup_name)(const char *name);
 
-/* 명령별 호출 횟수 */
+// Atomic counters support updates from concurrent syscall callers.
 static atomic64_t mq_counts[OS_MQ_CMD_COUNT];
 
-/* 통계 조회 함수 */
+// Read a command counter; invalid command numbers return zero.
 unsigned long long mq_get_count(int cmd)
 {
     if (cmd < 0 || cmd >= OS_MQ_CMD_COUNT)
@@ -42,10 +45,10 @@ unsigned long long mq_get_count(int cmd)
         atomic64_read(&mq_counts[cmd]);
 }
 
-/* 다른 모듈에서 mq_get_count 사용 가능 */
+// Export the accessor for use by the mqmonitor module.
 EXPORT_SYMBOL(mq_get_count);
 
-/* 명령어 이름 반환 */
+// Return a readable command name for kernel logging.
 static const char *get_cmd_name(int cmd)
 {
     switch (cmd) {
@@ -62,7 +65,7 @@ static const char *get_cmd_name(int cmd)
     }
 }
 
-/* CR0 레지스터 직접 수정 */
+// Write CR0 directly to control its write-protect bit.
 static void write_cr0_direct(unsigned long value)
 {
     asm volatile("mov %0, %%cr0"
@@ -71,7 +74,7 @@ static void write_cr0_direct(unsigned long value)
                  : "memory");
 }
 
-/* 시스템 콜 테이블 항목 교체 */
+// Replace the syscall entry with local interrupts and preemption disabled.
 static void change_syscall(unsigned long new_addr)
 {
     unsigned long cr0;
@@ -82,36 +85,36 @@ static void change_syscall(unsigned long new_addr)
 
     cr0 = read_cr0();
 
-    /* 쓰기 보호(WP) 일시 해제 */
+    // Temporarily disable write protection for the table update.
     write_cr0_direct(cr0 & ~X86_CR0_WP);
 
     WRITE_ONCE(sys_call_table[OS_MQ_NR], new_addr);
 
-    /* WP 원상복구 */
+    // Restore the saved CR0 value after updating the table.
     write_cr0_direct(cr0);
 
     local_irq_restore(flags);
     preempt_enable();
 }
 
-/* 후킹 함수 */
+// Count and log calls before forwarding them to the original handler.
 static asmlinkage long my_mq(const struct pt_regs *regs)
 {
     int cmd = (int)regs->di;
 
-    /* 유효한 명령어의 호출 횟수 증가 */
+    // Count valid command attempts, including calls that later fail or block.
     if (cmd >= 0 && cmd < OS_MQ_CMD_COUNT)
         atomic64_inc(&mq_counts[cmd]);
 
-    /* 호출 정보 기록 */
+    // Log the command and PID of the calling process.
     pr_info("[mqhooking] os_mq called: cmd=%d (%s), pid=%d\n",
             cmd, get_cmd_name(cmd), current->pid);
 
-    /* 원본 시스템 콜 실행 */
+    // Forward unchanged register arguments and return the original result.
     return original_mq(regs);
 }
 
-/* kallsyms_lookup_name 주소 탐색 */
+// Resolve kallsyms_lookup_name through a temporary kprobe.
 static int resolve_kallsyms(void)
 {
     struct kprobe kp = {
@@ -129,7 +132,7 @@ static int resolve_kallsyms(void)
     return lookup_name ? 0 : -ENOENT;
 }
 
-/* 모듈 초기화 */
+// Initialize counters, resolve symbols, and install the hook.
 static int __init mqhooking_init(void)
 {
     int ret;
@@ -137,18 +140,18 @@ static int __init mqhooking_init(void)
 
     pr_info("[mqhooking] module loading\n");
 
-    /* 호출 카운터 초기화 */
+    // Reset all command counters before installing the hook.
     for (i = 0; i < OS_MQ_CMD_COUNT; i++)
         atomic64_set(&mq_counts[i], 0);
 
-    /* kallsyms 주소 탐색 */
+    // Obtain the kernel symbol lookup function address.
     ret = resolve_kallsyms();
     if (ret < 0) {
         pr_err("[mqhooking] kallsyms lookup failed\n");
         return ret;
     }
 
-    /* 시스템 콜 테이블 검색 */
+    // Locate the kernel system call table.
     sys_call_table =
         (unsigned long *)lookup_name("sys_call_table");
 
@@ -157,7 +160,7 @@ static int __init mqhooking_init(void)
         return -ENOENT;
     }
 
-    /* 원본 시스템 콜 백업 */
+    // Save the existing handler for forwarding and restoration.
     original_mq =
         (void *)READ_ONCE(sys_call_table[OS_MQ_NR]);
 
@@ -166,7 +169,7 @@ static int __init mqhooking_init(void)
         return -EINVAL;
     }
 
-    /* 후킹 함수로 교체 */
+    // Install the wrapper that records command usage.
     change_syscall((unsigned long)my_mq);
 
     pr_info("[mqhooking] os_mq hooked (nr=%d)\n",
@@ -175,10 +178,10 @@ static int __init mqhooking_init(void)
     return 0;
 }
 
-/* 모듈 제거 */
+// Remove the hook during module unloading.
 static void __exit mqhooking_exit(void)
 {
-    /* 원본 시스템 콜 복원 */
+    // Restore the handler saved when this module was loaded.
     change_syscall((unsigned long)original_mq);
 
     pr_info("[mqhooking] os_mq restored\n");

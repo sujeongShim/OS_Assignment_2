@@ -7,6 +7,7 @@
 #include <sys/syscall.h>
 #include <errno.h>
 
+// Command values and argument layouts must match the kernel ABI.
 #define OS_MQ_OPEN   0
 #define OS_MQ_SEND   1
 #define OS_MQ_RECV   2
@@ -17,6 +18,7 @@
 #define OS_MQ_NAME_MAX 32
 #define OS_MQ_MSG_MAX  256
 
+// Must match the custom syscall number in the target Linux kernel.
 #define __NR_os_mq 336
 
 struct os_mq_open_arg {
@@ -35,14 +37,17 @@ struct os_mq_close_arg {
     int qid;
 };
 
+// Track unique queue IDs for cleanup when the exit command is entered.
 static int opened_qids[100];
 static int opened_count = 0;
 
+// libc syscall() converts kernel errors to -1 and sets errno.
 static long os_mq(int cmd, void *arg)
 {
     return syscall(__NR_os_mq, cmd, arg);
 }
 
+// Record each ID once, within the fixed tracking-array capacity.
 static void add_qid(int qid)
 {
     int i;
@@ -56,7 +61,7 @@ static void add_qid(int qid)
         opened_qids[opened_count++] = qid;
 }
 
-//use..?
+// Destroy all tracked queues and reset the tracking list.
 static void close_all(void)
 {
     int i;
@@ -72,6 +77,7 @@ static void close_all(void)
     opened_count = 0;
 }
 
+// Read and dispatch shell commands until exit or end of input.
 int main(void)
 {
     char line[512];
@@ -87,6 +93,7 @@ int main(void)
         if (fgets(line, sizeof(line), stdin) == NULL)
             break;
 
+        // Remove the newline before tokenizing the command.
         line[strcspn(line, "\n")] = '\0';
 
         cmd = strtok(line, " ");
@@ -134,6 +141,7 @@ int main(void)
         else if (strcmp(cmd, "send") == 0 ||
                  strcmp(cmd, "nbsend") == 0) {
             char *qid_str = strtok(NULL, " ");
+            // Keep the remaining input, including spaces, as one message.
             char *message = strtok(NULL, "");
             struct os_mq_io_arg arg;
             long ret;
@@ -145,6 +153,7 @@ int main(void)
 
             arg.qid = atoi(qid_str);
             arg.buf = message;
+            // Include the null terminator in the transmitted text.
             arg.len = strlen(message) + 1;
             arg.flags = (strcmp(cmd, "nbsend") == 0)
                             ? OS_MQ_NONBLOCK : 0;
@@ -178,6 +187,7 @@ int main(void)
                 continue;
             }
 
+            // Keep an extra zero byte after the receive-buffer capacity.
             memset(buf, 0, sizeof(buf));
 
             arg.qid = atoi(qid_str);
@@ -228,6 +238,7 @@ int main(void)
                 printf("  closed qid=%d\n", arg.qid);
 
                 
+                // Shift remaining IDs to remove the successfully closed queue.
                 for (i = 0; i < opened_count; i++) {
                     if (opened_qids[i] == arg.qid) {
                         memmove(&opened_qids[i],

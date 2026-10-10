@@ -1,3 +1,6 @@
+/*
+ * Companion module that prints mqhooking counters on unload.
+ */
 
 #include <linux/module.h>
 #include <linux/kernel.h>
@@ -9,14 +12,14 @@ MODULE_LICENSE("GPL");
 MODULE_AUTHOR("os2024402041");
 MODULE_DESCRIPTION("os_mq usage statistics monitor");
 
-/* 모듈 적재 */
+// Announce loading; statistics are printed when the monitor is unloaded.
 static int __init mqmonitor_init(void)
 {
     pr_info("[mqmonitor] module loaded\n");
     return 0;
 }
 
-/* 모듈 제거 시 통계 출력 */
+// Read command counters and print the usage summary during module removal.
 static void __exit mqmonitor_exit(void)
 {
     unsigned long long open_count;
@@ -25,7 +28,7 @@ static void __exit mqmonitor_exit(void)
     unsigned long long close_count;
     unsigned long long total;
 
-    /* mqhooking에서 호출 횟수 가져오기 */
+    // Read counters separately; concurrent calls may occur between these reads.
     open_count  = mq_get_count(OS_MQ_OPEN);
     send_count  = mq_get_count(OS_MQ_SEND);
     recv_count  = mq_get_count(OS_MQ_RECV);
